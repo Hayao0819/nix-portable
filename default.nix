@@ -101,11 +101,19 @@ let
 
     # dump environment on exit if debug is enabled
     if [ -n "\$NP_DEBUG" ] && [ "\$NP_DEBUG" -ge 1 ]; then
-      trap "declare -p > /tmp/np_env" EXIT
+      trap "declare -p > \''${TMPDIR:-/tmp}/np_env" EXIT
     fi
 
     # there seem to be less issues with proot when disabling seccomp
-    export PROOT_NO_SECCOMP=\''${PROOT_NO_SECCOMP:-1}
+    # though on android it is needed
+    if [ -n "\$TERMUX_VERSION" ]; then
+      unset LD_PRELOAD
+      NP_RUNTIME=\''${NP_RUNTIME:-proot}
+      export PROOT_TMP_DIR="\$TMPDIR/proot"
+      mkdir -p "\$PROOT_TMP_DIR"
+    else
+      export PROOT_NO_SECCOMP=\''${PROOT_NO_SECCOMP:-1}
+    fi
 
     set -e
     if [ -n "\$NP_DEBUG" ] && [ "\$NP_DEBUG" -ge 2 ]; then
@@ -170,7 +178,6 @@ let
       echo "build-users-group = " >> \$dir/conf/nix.conf
       echo "experimental-features = nix-command flakes" >> \$dir/conf/nix.conf
       echo "ignored-acls = security.selinux system.nfs4_acl" >> \$dir/conf/nix.conf
-      echo "use-sqlite-wal = false" >> \$dir/conf/nix.conf
       echo "sandbox-paths = /bin/sh=\$dir/busybox/bin/busybox" >> \$dir/conf/nix.conf
 
       # configurable config
@@ -188,7 +195,8 @@ let
     if [ "\$newNPVersion" == "false" ]; then
 
       debug "binaries already installed"
-      export PATH="\$dir/busybox/bin"
+      # our busybox does not run on termux, therefore we suffix the PATH only on termux
+      export PATH="\''${TERMUX_VERSION:+\$PATH:}\$dir/busybox/bin"
 
     else
 
@@ -206,7 +214,8 @@ let
         [ ! -e "\$dir/busybox/bin/\$bin" ] && ln -s busybox "\$dir/busybox/bin/\$bin"
       done
 
-      export PATH="\$dir/busybox/bin"
+      # our busybox does not run on termux, therefore we suffix the PATH only on termux
+      export PATH="\''${TERMUX_VERSION:+\$PATH:}\$dir/busybox/bin"
 
       # install other binaries
       ${installBin zstd "zstd"}
@@ -273,7 +282,12 @@ let
       ### gather paths to bind for proot
       # we cannot bind / to / without running into a lot of trouble, therefore
       # we need to collect all top level directories and bind them inside an empty root
-      pathsTopLevel="\$(find / -mindepth 1 -maxdepth 1 -not -name nix -not -name dev)"
+
+      # for termux a fallback is needed as enumerating top level directories fails
+      if ! pathsTopLevel="\$(find / -mindepth 1 -maxdepth 1 -not -name nix -not -name dev 2>&3)"; then
+        debug "Error: unable to list top level directories. Falling back to default binds."
+        pathsTopLevel="/etc /proc"
+      fi
 
 
       toBind=""
@@ -315,6 +329,25 @@ let
       if test -s /bin/sh && [[ "\$(realpath /bin/sh)" == /nix/store/* ]]; then
         toBind="\$toBind \$dir/busybox/bin /bin"
       fi
+
+      # provide /bin/sh via the shipped busybox
+      toBind="\$toBind \$dir/busybox/bin/busybox /bin/sh"
+
+      # on termux, make sure termux packages still work inside the nix-portable environment
+      if [ -n "\$TERMUX_VERSION" ]; then
+        # binds required so termux native packages still run inside the nix-portable sandbox
+        # TODO: this doesn't quite work yet. debug and fix
+        toBind="\$toBind /system/lib64/libc.so /system/lib64/libc.so"
+        toBind="\$toBind /system/lib64/ld-android.so /system/lib64/ld-android.so"
+        toBind="\$toBind /system/lib64/libdl.so /system/lib64/libdl.so"
+        toBind="\$toBind /system/bin /system/bin"
+        toBind="\$toBind /system/lib64 /system/lib64"
+        toBind="\$toBind /apex/com.android.runtime/bin /apex/com.android.runtime/bin"
+        toBind="\$toBind /linkerconfig/ld.config.txt /linkerconfig/ld.config.txt"
+        toBind="\$toBind \$dir/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt"
+        toBind="\$toBind \$(realpath \$HOME/../usr/etc/resolv.conf) /etc/resolv.conf"
+      fi
+
     }
 
 
@@ -340,7 +373,6 @@ let
     [ -z "\$NP_BWRAP" ] && NP_BWRAP=\$(PATH="\$PATH_OLD:\$PATH" which bwrap 2>/dev/null) || true
     [ -z "\$NP_BWRAP" ] && NP_BWRAP=\$dir/bin/bwrap
     debug "bwrap executable: \$NP_BWRAP"
-    # [ -z "\$NP_NIX ] && NP_NIX=\$(PATH="\$PATH_OLD:\$PATH" which nix 2>/dev/null) || true
     [ -z "\$NP_NIX" ] && NP_NIX=\$dir/bin/nix
     debug "nix executable: \$NP_NIX"
     [ -z "\$NP_PROOT" ] && NP_PROOT=\$(PATH="\$PATH_OLD:\$PATH" which proot 2>/dev/null) || true
@@ -426,37 +458,36 @@ let
     # We only unpack missing store paths from the tar archive.
     index="$(cat ${storeTar}/index)"
 
-    # if [ ! "\$NP_RUNTIME" == "nix" ]; then
-      export missing=\$(
-        for path in \$index; do
-          if [ ! -e \$store/\$(basename \$path) ]; then
-            echo "nix/store/\$(basename \$path)"
-          fi
-        done
+    export missing=\$(
+      for path in \$index; do
+        basepath=\$(basename \$path)
+        if [ ! -e \$store/\$basepath ]; then
+          echo "nix/store/\$basepath"
+        fi
+      done
+    )
+
+    if [ -n "\$missing" ]; then
+      debug "extracting missing store paths"
+      (
+        mkdir -p \$dir/tmp \$store/
+        rm -rf \$dir/tmp/*
+        cd \$dir/tmp
+        unzip -qqp "\$self" ${ lib.removePrefix "/" "${storeTar}/tar"} \
+          | \$dir/bin/zstd -d \
+          | tar -x \$missing --strip-components 2
+        mv \$dir/tmp/* \$store/
       )
+      rm -rf \$dir/tmp
+    fi
 
-      if [ -n "\$missing" ]; then
-        debug "extracting missing store paths"
-        (
-          mkdir -p \$dir/tmp \$store/
-          rm -rf \$dir/tmp/*
-          cd \$dir/tmp
-          unzip -qqp "\$self" ${ lib.removePrefix "/" "${storeTar}/tar"} \
-            | \$dir/bin/zstd -d \
-            | tar -x \$missing --strip-components 2
-          mv \$dir/tmp/* \$store/
-        )
-        rm -rf \$dir/tmp
-      fi
-
-      if [ -n "\$missing" ]; then
-        debug "registering new store paths to DB"
-        reg="$(cat ${storeTar}/closureInfo/registration)"
-        cmd="\$run \$store${lib.removePrefix "/nix/store" nix}/bin/nix-store --load-db"
-        debug "running command: \$cmd"
-        echo "\$reg" | \$cmd
-      fi
-    # fi
+    if [ -n "\$missing" ]; then
+      debug "registering new store paths to DB"
+      reg="$(cat ${storeTar}/closureInfo/registration)"
+      cmd="\$run \$store${lib.removePrefix "/nix/store" nix}/bin/nix-store --load-db"
+      debug "running command: \$cmd"
+      echo "\$reg" | \$cmd
+    fi
 
 
     ### select executable
@@ -468,6 +499,7 @@ let
     if [ "\$executable" != "" ]; then
       bin="\$executable"
       debug "executable is hardcoded to: \$bin"
+
     elif [[ "\$(basename \$0)" == nix-portable* ]]; then\
       if [ -z "\$1" ]; then
         echo "Error: please specify the nix binary to execute"
@@ -480,6 +512,7 @@ let
         bin="\$store${lib.removePrefix "/nix/store" nix}/bin/\$1"
         shift
       fi
+    # for binary selection via symlink
     else
       bin="\$store${lib.removePrefix "/nix/store" nix}/bin/\$(basename \$0)"
     fi
@@ -498,11 +531,7 @@ let
     ### check if nix is functional with or without sandbox
     # sandbox-fallback is not reliable: https://github.com/NixOS/nix/issues/4719
     if [ "\$newNPVersion" == "true" ] || [ "\$lastRuntime" != "\$NP_RUNTIME" ]; then
-      nixBin="\$store${lib.removePrefix "/nix/store" nix}/bin/nix"
-      # if [ "\$NP_RUNTIME" == "nix" ]; then
-      #   nixBin="nix"
-      # else
-      # fi
+      nixBin="\$(dirname \$bin)/nix"
       debug "Testing if nix can build stuff without sandbox"
       if ! \$run "\$nixBin" build --no-link -f "\$dir/mini-drv.nix" --option sandbox false >&3 2>&3; then
         echo "Fatal error: nix is unable to build packages"
@@ -561,10 +590,13 @@ let
     ### print elapsed time
     end=\$(date +%s%N)  # end time in nanoseconds
     # time elapsed in millis with two decimal places
-    # elapsed=\$(echo "scale=2; (\$end - \$start)/1000000000" | bc)
-    elapsed=\$(echo "scale=2; (\$end - \$start)/1000000" | bc)
-    debug "Time to initialize nix-portable: \$elapsed millis"
 
+    # print stats about initialization time of nix-portable
+    # skipt for termux, as it doesn't have bc installed
+    if [ -z "\$TERMUX_VERSION" ]; then
+      elapsed=\$(echo "scale=2; (\$end - \$start)/1000000" | bc)
+      debug "Time to initialize nix-portable: \$elapsed millis"
+    fi
 
 
     ### run commands

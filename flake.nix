@@ -139,7 +139,6 @@
             cp ${self.packages.x86_64-linux.nix-portable}/bin/nix-portable $out/nix-portable-x86_64
             cp ${self.packages.aarch64-linux.nix-portable}/bin/nix-portable $out/nix-portable-aarch64
           '';
-          qemu-efi-aarch64 = pkgs.callPackage ./testing/qemu-efi.nix {};
         });
       })
       { packages = (genAttrs [ "x86_64-linux" ] (system:
