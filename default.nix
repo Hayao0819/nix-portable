@@ -548,7 +548,7 @@ let
     ### check if nix is functional with or without sandbox
     # sandbox-fallback is not reliable: https://github.com/NixOS/nix/issues/4719
     if [ "\$newNPVersion" == "true" ] || [ "\$lastRuntime" != "\$NP_RUNTIME" ]; then
-      nixBin="\$(dirname "\$bin")/nix"
+      nixBin="\$store${lib.removePrefix "/nix/store" nix}/bin/nix"
       debug "Testing if nix can build stuff without sandbox"
       if ! \$run "\$nixBin" build --no-link -f "\$dir/mini-drv.nix" --option sandbox false >&3 2>&3; then
         echo "Fatal error: nix is unable to build packages"
