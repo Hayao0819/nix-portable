@@ -292,7 +292,7 @@ let
       # we need to collect all top level directories and bind them inside an empty root
 
       # for termux a fallback is needed as enumerating top level directories fails
-      if ! pathsTopLevel="\$(find / -mindepth 1 -maxdepth 1 -not -name nix -not -name dev 2>&3)"; then
+      if ! pathsTopLevel="\$(find / -mindepth 1 -maxdepth 1 -not -name nix -not -name dev -not -type s 2>&3)"; then
         debug "Error: unable to list top level directories. Falling back to default binds."
         pathsTopLevel="/etc /proc"
       fi
