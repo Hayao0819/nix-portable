@@ -486,6 +486,13 @@ let
         unzip -qqp "\$self" ${ lib.removePrefix "/" "${storeTar}/tar"} \
           | \$dir/bin/zstd -d \
           | tar -x \$missing --strip-components 2
+        # busybox tar strips leading '/' from symlink targets
+        find . -type l | while read -r link; do
+          target=\$(readlink "\$link")
+          case "\$target" in
+            nix/store/*) ln -sfn "/\$target" "\$link" ;;
+          esac
+        done
         mv \$dir/tmp/* \$store/
       )
       rm -rf \$dir/tmp
